@@ -1,0 +1,53 @@
+import torch
+import torch.nn as nn
+
+class NCA(nn.Module):
+    # Neural Cellular Automaton model with perception and state update.
+    def __init__(self, state_channels, hidden_channels, update_prob):
+        super().__init__()
+
+        self.update_prob = update_prob
+
+        # Perception layer extracts local spatial features from state.
+        self.perception = nn.Conv2d(
+            state_channels,
+            hidden_channels, 
+            kernel_size=3,
+            padding=1,
+            bias=False
+        )
+        
+        # Update network computes a state delta from perceived features.
+        self.update = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_channels, state_channels, kernel_size=1),
+        )
+    
+    def step(self, state):
+        # Compute local perception and update delta for one step.
+        features = self.perception(state)
+        delta = self.update(features)
+
+        if self.training:
+            # Random mask drops updates with probability 1 - update_prob.
+            mask = (
+                torch.rand(
+                    state.shape[0],
+                    1,
+                    state.shape[2],
+                    state.shape[3]
+                ) < self.update_prob
+            ).float()
+
+        delta = delta * mask
+
+        # Apply the masked delta to the current state.
+        return state + delta
+    
+    def forward(self, state, num_steps):
+        # Iterate the cellular automaton for num_steps.
+        for _ in range(num_steps):
+            state = self.step(state)
+
+        return state
