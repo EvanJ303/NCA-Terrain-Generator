@@ -24,7 +24,7 @@ class NCA(nn.Module):
             nn.Conv2d(hidden_channels, state_channels, kernel_size=1),
         )
     
-    def step(self, state):
+    def forward(self, state):
         # Compute local perception and update delta for one step.
         features = self.perception(state)
         delta = self.update(features)
@@ -40,14 +40,7 @@ class NCA(nn.Module):
                 ) < self.update_prob
             ).float()
 
-        delta = delta * mask
+            delta = delta * mask
 
         # Apply the masked delta to the current state.
         return state + delta
-    
-    def forward(self, state, num_steps):
-        # Iterate the cellular automaton for num_steps.
-        for _ in range(num_steps):
-            state = self.step(state)
-
-        return state
