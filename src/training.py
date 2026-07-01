@@ -3,7 +3,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import models, datasets
 from torchvision import transforms
 from torchvision.transforms import ToTensor, Normalize
@@ -14,6 +14,7 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
 STATE_CHANNELS = 16
 HIDDEN_CHANNELS = 32
+ALPHA_CHANNEL = 3
 UPDATE_PROB = 0.5
 MIN_STEPS = 64
 MAX_STEPS = 96
@@ -23,45 +24,69 @@ PERCEPTUAL_LOSS_WEIGHT_1 = 0.3
 PERCEPTUAL_LOSS_WEIGHT_2 = 0.7
 MSE_LOSS_WEIGHT = 0.1
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def generate_images(targets, model):
+    device = next(model.parameters()).device
+    batch_size = targets.size(0)
 
-os.makedirs('./data/models', exist_ok=True)
-os.makedirs('./data/plots', exist_ok=True)
+    steps = torch.randint(MIN_STEPS, MAX_STEPS + 1, (batch_size,), device=device)
+    max_steps = int(steps.max().item())
 
-transform = transforms.Compose([
-    ToTensor(),
-    Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+    states = torch.zeros((batch_size, STATE_CHANNELS, targets.size(2), targets.size(3)), device=device)
+    states[:, 4:, :, :] = 0.01 * torch.randn((batch_size, STATE_CHANNELS - 4, targets.size(2), targets.size(3)), device=device)
+    states[:, 3, targets.size(2) // 2, targets.size(3) // 2] = 1.0
 
-dataset = datasets.EuroSAT(
-    root='./data',
-    download=True,
-    transform=transform
-)
+    history = [states.clone()]
 
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
+    for _ in range(max_steps):
+        states = model(states)
+        history.append(states.clone())
 
-train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    states = torch.stack(tuple(history[s.item()][b] for b, s in enumerate(steps)), dim=0)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    alpha = torch.sigmoid(states[:, ALPHA_CHANNEL:ALPHA_CHANNEL + 1, :, :])
+    dead_mask = alpha < 0.1
 
-nca_model = NCA(state_channels=STATE_CHANNELS, hidden_channels=HIDDEN_CHANNELS, update_prob=UPDATE_PROB).to(device)
+    rgb = states[:, :3, :, :]
+    rgb[dead_mask.repeat(1, 3, 1, 1)] = 0.0
+    rgb = torch.clamp(rgb, 0.0, 1.0)
 
-vgg_model = models.vgg16(pretrained=True).features.to(device)
-for param in vgg_model.parameters():
-    param.requires_grad = False
+    return rgb
 
-vgg_slice_1 = nn.Sequential(*list(vgg_model.children())[:9]).to(device)
-vgg_slice_2 = nn.Sequential(*list(vgg_model.children())[:16]).to(device)
+def calculate_loss(images, targets, model, criterion):
+    device = next(model.parameters()).device
 
-optimizer = optim.Adam(nca_model.parameters(), lr=LEARNING_RATE)
-criterion = nn.MSELoss()
+    images = images.to(device)
+    targets = targets.to(device)
+
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    images = normalize(images)
+
+    slice_1 = nn.Sequential(*list(model.children())[:9]).to(device)
+    slice_2 = nn.Sequential(*list(model.children())[:16]).to(device)
+
+    features_images_1 = slice_1(images)
+    features_images_2 = slice_2(images)
+
+    with torch.no_grad():
+        features_targets_1 = slice_1(targets)
+        features_targets_2 = slice_2(targets)
+
+    perceptual_loss_1 = criterion(features_images_1, features_targets_1)
+    perceptual_loss_2 = criterion(features_images_2, features_targets_2)
+
+    mse_loss = criterion(images, targets)
+
+    total_loss = (
+        PERCEPTUAL_LOSS_WEIGHT_1 * perceptual_loss_1 +
+        PERCEPTUAL_LOSS_WEIGHT_2 * perceptual_loss_2 +
+        MSE_LOSS_WEIGHT * mse_loss
+    )
+
+    return total_loss
 
 def save_checkpoint(model, epoch):
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'nca_model_epoch_{epoch}_{timestamp}.pt'
+    current_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'nca_model_epoch_{epoch}_{current_timestamp}.pt'
     path = os.path.join('./data/models', filename)
     torch.save(model.state_dict(), path)
 
@@ -71,53 +96,82 @@ def save_checkpoint(model, epoch):
 
     print(f'Saved model checkpoint: {path}')
 
-for epoch in range(NUM_EPOCHS):
-    for batch_idx, (targets, _) in enumerate(train_loader):
-        targets = targets.to(device)
+def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        steps = torch.randint(MIN_STEPS, MAX_STEPS + 1, (BATCH_SIZE,), device=device)
-        max_steps = int(steps.max().item())
+    session_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        states = torch.zeros((BATCH_SIZE, STATE_CHANNELS, targets.size(2), targets.size(3)), device=device)
-        states[:, 4:, :, :] = 0.01 * torch.randn((BATCH_SIZE, STATE_CHANNELS - 4, targets.size(2), targets.size(3)), device=device)
-        states[:, 3, targets.size(2) // 2, targets.size(3) // 2] = 1.0
+    os.makedirs('./data/models', exist_ok=True)
+    os.makedirs('./data/plots', exist_ok=True)
 
-        history = [states.clone()]
+    transform = transforms.Compose([
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
 
-        for _ in range(max_steps):
-            states = nca_model(states)
-            history.append(states.clone())
+    dataset = datasets.EuroSAT(
+        root='./data',
+        download=True,
+        transform=transform
+    )
 
-        states = torch.stack((history[s.item()][b] for b, s in enumerate(steps)), dim=0)
+    forest_targets = [idx for idx, (_, target) in enumerate(dataset) if target == 4]
+    dataset = Subset(dataset, forest_targets)
 
-        images = states[:, :3, :, :]
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
 
-        vgg_features_images_1 = vgg_slice_1(images)
-        vgg_features_images_2 = vgg_slice_2(images)
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-        with torch.no_grad():
-            vgg_features_targets_1 = vgg_slice_1(targets)
-            vgg_features_targets_2 = vgg_slice_2(targets)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-        perceptual_loss_1 = criterion(vgg_features_images_1, vgg_features_targets_1)
-        perceptual_loss_2 = criterion(vgg_features_images_2, vgg_features_targets_2)
+    nca_model = NCA(state_channels=STATE_CHANNELS, hidden_channels=HIDDEN_CHANNELS, alpha_channel=ALPHA_CHANNEL, update_prob=UPDATE_PROB).to(device)
 
-        mse_loss = criterion(images, targets)
+    vgg_model = models.vgg16(pretrained=True).features.to(device)
+    for param in vgg_model.parameters():
+        param.requires_grad = False
 
-        total_loss = (
-            PERCEPTUAL_LOSS_WEIGHT_1 * perceptual_loss_1 +
-            PERCEPTUAL_LOSS_WEIGHT_2 * perceptual_loss_2 +
-            MSE_LOSS_WEIGHT * mse_loss
-        )
+    optimizer = optim.Adam(nca_model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.MSELoss()
 
-        optimizer.zero_grad()
-        total_loss.backward()
-        nn.utils.clip_grad_norm_(nca_model.parameters(), CLIP_GRAD_NORM)
-        optimizer.step()
+    for epoch in range(NUM_EPOCHS):
+        for batch_idx, (targets, _) in enumerate(train_loader):
+            images = generate_images(targets=targets, model=nca_model)
+            loss = calculate_loss(images=images, targets=targets, model=vgg_model, criterion=criterion)
 
-    for batch_idx, (targets, _) in enumerate(val_loader):
-        # Validation loop can be implemented here if needed, similar to the training loop but without gradient updates.
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(nca_model.parameters(), CLIP_GRAD_NORM)
+            optimizer.step()
 
-    if (epoch + 1) % 10 == 0 or (epoch + 1) == NUM_EPOCHS:
-        save_checkpoint(nca_model, epoch + 1)
-        
+        num_val_batches = len(val_loader)
+        val_loss = 0.0
+
+        for batch_idx, (targets, _) in enumerate(val_loader):
+            with torch.no_grad():
+                images = generate_images(targets=targets, model=nca_model)
+                loss = calculate_loss(images=images, targets=targets, model=vgg_model, criterion=criterion)
+            val_loss += loss.item()
+
+        val_loss /= num_val_batches
+        print(f'Epoch [{epoch+1}/{NUM_EPOCHS}], Validation Loss: {val_loss:.4f}')
+
+        fig = plt.figure(figsize=(8, 6))
+        plt.plot(range(1, epoch + 2), [val_loss] * (epoch + 1), label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Validation Loss over Epochs')
+        plt.grid(True)
+        plt.tight_layout()
+
+        filename = f'session_loss_plot_{session_timestamp}.png'
+        plot_path = os.path.join('./data/plots', filename)
+        fig.savefig(plot_path)
+        plt.close(fig)
+
+        if (epoch + 1) % 10 == 0 or (epoch + 1) == NUM_EPOCHS:
+            save_checkpoint(nca_model, epoch + 1)
+
+if __name__ == '__main__':
+    main()
