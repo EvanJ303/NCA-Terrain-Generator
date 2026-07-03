@@ -24,7 +24,7 @@ def load_latest_checkpoint(model):
     with open('./data/latest_checkpoint.txt', 'r') as f:
         filename = f.read().strip()
     
-    path = os.path.join('./data/checkpoints', filename)
+    path = os.path.join('./data/models', filename)
     
     model.load_state_dict(torch.load(path, map_location=device))
 
