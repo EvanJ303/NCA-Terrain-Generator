@@ -12,22 +12,22 @@ import matplotlib.pyplot as plt
 from model import NCA
 from image_generator import generate_images
 
-with open('../config.json', 'r') as f:
+with open('./config.json', 'r') as f:
     config = json.load(f)
 
-BATCH_SIZE = config['batch_size']
-LEARNING_RATE = config['learning_rate']
-STATE_CHANNELS = config['state_channels']
-HIDDEN_CHANNELS = config['hidden_channels']
-UPDATE_PROB = config['update_prob']
-MIN_STEPS = config['min_steps']
-MAX_STEPS = config['max_steps']
-VAL_STEPS = config['val_steps']
-NUM_EPOCHS = config['num_epochs']
-CLIP_GRAD_NORM = config['clip_grad_norm']
-PERCEPTUAL_LOSS_WEIGHT_1 = config['perceptual_loss_weight_1']
-PERCEPTUAL_LOSS_WEIGHT_2 = config['perceptual_loss_weight_2']
-MSE_LOSS_WEIGHT = config['mse_loss_weight']
+BATCH_SIZE = config['training']['batch_size']
+LEARNING_RATE = config['training']['learning_rate']
+STATE_CHANNELS = config['model']['state_channels']
+HIDDEN_CHANNELS = config['model']['hidden_channels']
+UPDATE_PROB = config['model']['update_prob']
+MIN_STEPS = config['training']['min_steps']
+MAX_STEPS = config['training']['max_steps']
+VAL_STEPS = config['training']['val_steps']
+NUM_EPOCHS = config['training']['num_epochs']
+CLIP_GRAD_NORM = config['training']['clip_grad_norm']
+PERCEPTUAL_LOSS_WEIGHT_1 = config['training']['perceptual_loss_weight_1']
+PERCEPTUAL_LOSS_WEIGHT_2 = config['training']['perceptual_loss_weight_2']
+MSE_LOSS_WEIGHT = config['training']['mse_loss_weight']
 
 def compute_gram_matrix(features):
     # Calculate the Gram matrix for a batch of feature maps.
@@ -167,7 +167,7 @@ def main():
         for targets, _ in train_loader:
             steps = torch.randint(MIN_STEPS, MAX_STEPS + 1, (1,), device=device).item()
 
-            images = generate_images(targets=targets, model=nca_model, steps=steps)
+            images = generate_images(height=targets.size(2), width=targets.size(3), batch_size=targets.size(0), model=nca_model, num_steps=steps)
             loss = calculate_loss(images=images, targets=targets, slice_1=slice_1, slice_2=slice_2, criterion=criterion)
 
             optimizer.zero_grad()
@@ -181,7 +181,7 @@ def main():
         # Evaluate the model on the validation set without gradient computation.
         for targets, _ in val_loader:
             with torch.no_grad():
-                images = generate_images(targets=targets, model=nca_model, steps=VAL_STEPS)
+                images = generate_images(height=targets.size(2), width=targets.size(3), batch_size=targets.size(0), model=nca_model, num_steps=VAL_STEPS)
                 loss = calculate_loss(images=images, targets=targets, slice_1=slice_1, slice_2=slice_2, criterion=criterion)
             val_loss += loss.item()
 
