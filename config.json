@@ -20,7 +20,7 @@
         "overflow_loss_weight": 0.01
     },
     "inference": {
-        "num_images": 1,
+        "num_images": 10,
         "image_height": 128,
         "image_width": 128,
         "num_steps": 96
